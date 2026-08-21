@@ -1,0 +1,51 @@
+# ---------------------------------------------------------------------------
+# Backstop only. This repo is assembled by whitelist-copy of source code and a
+# few small reference files; patient data, model checkpoints and logs are never
+# copied in. These rules make sure they can never be committed by accident.
+# ---------------------------------------------------------------------------
+
+# Patient data, model artifacts, result arrays, logs
+*.pt
+*.pth
+*.npz
+*.npy
+*.h5
+*.db
+*.parquet
+*.log
+
+# Pickles and CSVs are blocked by default ...
+*.pkl
+*.csv
+
+# ... except these small, non-PHI reference / vocabulary files that the code
+# needs to run (token & age index maps, aggregate Table 1, public phecode maps,
+# and the feature-importance reference used by the figure scripts).
+!src/behrt/age2idx.pkl
+!src/behrt/token2idx.pkl
+!src/behrt/table1_cohort.csv
+!src/external_validation/aou/age2idx.pkl
+!src/external_validation/aou/token2idx.pkl
+!reference/phecode_maps/*.csv
+
+# Placeholder dirs: keep their README/.gitkeep, ignore everything dropped in them
+data/*
+!data/README.md
+models/*
+!models/README.md
+results/*
+!results/.gitkeep
+
+# Python / Jupyter cruft
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.cursor/
+.claude/
+
+# Local backups / scratch
+*.bak
+*.bak_*
+
+# Local env overrides (keep .env.example)
+.env

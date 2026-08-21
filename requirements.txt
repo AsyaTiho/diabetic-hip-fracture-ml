@@ -1,0 +1,13 @@
+# Python 3.11, CUDA-capable GPU recommended for BEHRT pretraining/finetuning.
+# Versions are those used to produce the published results.
+torch==2.5.1
+transformers==5.3.0
+peft==0.18.1
+scikit-learn==1.7.2
+xgboost==3.0.5
+optuna==4.5.0
+pandas==2.3.3
+numpy==2.0.1
+scipy==1.16.0
+matplotlib==3.10.7
+seaborn==0.13.2

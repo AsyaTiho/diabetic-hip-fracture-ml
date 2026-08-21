@@ -1,0 +1,30 @@
+cff-version: 1.2.0
+message: "If you use this code, please cite the associated paper."
+title: "Prediction of Hip Fracture in Patients with Diabetes"
+# TODO(author): add ORCIDs if desired, and the DOI once the paper is published.
+authors:
+  - family-names: "Gerasimenko"
+    given-names: "Anna"
+  - family-names: "Kramer"
+    given-names: "Benjamin"
+  - family-names: "Jain"
+    given-names: "Rajesh K."
+  - family-names: "Rzhetsky"
+    given-names: "Andrey"
+license: MIT
+repository-code: "https://github.com/AsyaTiho/diabetic-hip-fracture-ml"
+preferred-citation:
+  type: article
+  title: "Prediction of Hip Fracture in Patients with Diabetes"
+  journal: "npj Digital Medicine"
+  year: 2026
+  # doi: "10.1038/..."   # TODO(author): fill on acceptance
+  authors:
+    - family-names: "Gerasimenko"
+      given-names: "Anna"
+    - family-names: "Kramer"
+      given-names: "Benjamin"
+    - family-names: "Jain"
+      given-names: "Rajesh K."
+    - family-names: "Rzhetsky"
+      given-names: "Andrey"
