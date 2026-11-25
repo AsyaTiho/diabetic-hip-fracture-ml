@@ -31,6 +31,17 @@ models/                       trained checkpoints land here (git-ignored)
 results/                      generated figures/tables (git-ignored)
 ```
 
+## How the cohort was built
+
+The code that turns the raw MarketScan databases into `patient_sequences.pkl`,
+`hip_frac_labels_CANONICAL.pkl` and the one-hot matrices is not shipped: it is
+useless without the licensed source data and carries the database paths of the
+machine it ran on. [`docs/COHORT_CONSTRUCTION.md`](docs/COHORT_CONSTRUCTION.md)
+records what it does in full, including the inclusion criteria and the SQL, the
+extraction query and why it is shaped the way it is, how sequences and the
+vocabulary are built, and a defect in the adult-onset criterion found on
+2026-11-24 together with its correction.
+
 ## Pipeline order
 
 1. **Build cohort, labels, sequences** — `src/behrt/_build_canonical_labels.py`,
@@ -82,10 +93,22 @@ Component folders keep their own notes where one exists
 
 The risk classes are defined by the interval between the diabetes index and the
 hip fracture, and a patient's age is deterministically related to that interval,
-so an age embedding leaks the outcome. `finetune_behrt_lora.py` therefore blanks
-every age token before training and inference: age is never read into the model.
-This is the model reported in the manuscript, and the repository does not ship a
-runnable age-using variant. The leak itself is demonstrated (not reproduced as a
+so an age embedding leaks the outcome **when case records are cut at the
+fracture**. For that design, the primary reported model, `finetune_behrt_lora.py`
+blanks every age token before training and inference.
+
+The landmark and matched arms keep age. Cutting every record at a fixed interval
+after the diabetes index makes the age gap identical for every patient, so it
+carries no information about the outcome: a predictor given only the age gap
+scores 0.505 there, against 0.903 on the cut-at-fracture design. Age is a genuine
+hip-fracture risk factor, so withholding it where it does not leak would weaken
+the model for nothing.
+
+The channel is therefore selected per arm by `BEHRT_AGE_MODE`, which is
+**required and has no default**: `removed` for the primary arm, `normal` for the
+landmark and matched arms. Each file in `configs/` sets it, and the chosen mode
+is recorded in the checkpoint and the prediction files, so a result states how it
+was produced. The leak itself is demonstrated (not reproduced as a
 usable model) by the age-gap cheater in `src/robustness/`, which shows that the
 age gap alone separates the fracture classes on the original data and collapses
 to chance once the observation window is fixed by the landmark cut.

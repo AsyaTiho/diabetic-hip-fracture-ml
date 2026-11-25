@@ -18,14 +18,46 @@ class MLMLoader(Dataset):
         self.age_pad_id = age2idx.get('PAD', 0)
 
         unk = self.unk_id
-        self.code_ids = [
-            np.array([token2idx.get(c, unk) for c in row], dtype=np.int32)
-            for row in dataframe[code]
-        ]
-        self.age_ids = [
-            np.array([age2idx.get(str(a), 0) for a in row], dtype=np.int32)
-            for row in dataframe[age]
-        ]
+
+        # The corpus may arrive ALREADY ENCODED as int32 id arrays: holding the
+        # full MarketScan corpus as Python strings needs ~132 GB against ~24 GB
+        # encoded (see read_sequences.read_encoded).  Accept either form.
+        #
+        # Without this branch, integer input fails SILENTLY rather than raising:
+        # token2idx is keyed by strings, so token2idx.get(<int>, unk) misses on
+        # every token and yields UNK, and the model pre-trains on a corpus of
+        # nothing but unknown tokens.
+        _first = dataframe[code].iloc[0] if len(dataframe) else []
+        _pre_encoded = (hasattr(_first, 'dtype')
+                        and np.issubdtype(_first.dtype, np.integer))
+
+        if _pre_encoded:
+            self.code_ids = list(dataframe[code])
+            self.age_ids  = list(dataframe[age])
+        else:
+            self.code_ids = [
+                np.array([token2idx.get(c, unk) for c in row], dtype=np.int32)
+                for row in dataframe[code]
+            ]
+            self.age_ids = [
+                np.array([age2idx.get(str(a), 0) for a in row], dtype=np.int32)
+                for row in dataframe[age]
+            ]
+
+        # Gate: any corpus/vocabulary mismatch shows up as a flood of UNK.
+        # Sampled, because the corpus has billions of tokens.
+        if self.code_ids:
+            _step = max(1, len(self.code_ids) // 20_000)
+            _sample = np.concatenate(self.code_ids[::_step])
+            if _sample.size:
+                _unk_frac = float((_sample == unk).mean())
+                if _unk_frac > 0.02:
+                    raise ValueError(
+                        f'{_unk_frac:.1%} of sampled tokens are UNK, which means '
+                        f'the corpus and the vocabulary do not match. Check that '
+                        f'token2idx is the one the corpus was encoded with. '
+                        f'(pre_encoded={_pre_encoded}, vocab={len(token2idx):,})')
+                self.unk_fraction = _unk_frac
 
         # Store sex values (static per patient, will be broadcast to all positions)
         if sex_dict is not None and 'enrolid' in dataframe.columns:

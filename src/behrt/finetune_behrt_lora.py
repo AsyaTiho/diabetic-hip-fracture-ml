@@ -51,7 +51,8 @@ PRETRAIN_CKPT = os.path.join(DATA_DIR, 'output', 'behrt_best.pt')
 FINETUNE_CKPT = os.environ.get('BEHRT_FINETUNE_CKPT',
                                os.path.join(OUTPUT_DIR, 'behrt_lora_best.pt'))
 
-# Temporal-leakage correction (always on). A patient's age is deterministically
+# Temporal-leakage correction, SELECTED PER ARM by BEHRT_AGE_MODE (required,
+# no default; see resolve_age_mode below). A patient's age is deterministically
 # related to the diabetes-to-fracture interval that defines the label, so an age
 # embedding leaks the outcome. Every age token is therefore blanked before
 # training and inference (see FinetuneDataset); this is the model reported in the
@@ -104,6 +105,41 @@ LORA_TARGET_MODULES = ['query', 'value']
 # ═══════════════════════════════════════════════════════════════
 #  DATASET
 # ═══════════════════════════════════════════════════════════════
+def resolve_age_mode():
+    """Return 'removed' or 'normal'; refuse if the caller did not say.
+
+    REQUIRED, no default.  The arms deliberately differ and this file serves all
+    of them:
+
+      * The MAIN MarketScan model is age-blind.  Case records are cut at the
+        fracture, so the age gap within a record encodes the diabetes-to-fracture
+        interval that defines the label; a predictor given only that gap scores
+        0.903.  Age must be withheld.
+      * The LANDMARK and MATCHED arms keep age.  Every record is cut at a fixed
+        interval after the diabetes index, so the age gap is the same for
+        everyone and carries nothing (0.505, a coin flip).  Age is a genuine
+        hip-fracture risk factor, so withholding it there would weaken the model
+        for no benefit.
+
+    This file previously blanked age unconditionally, with run_landmark.sh
+    stating "there is nothing to configure for age here".  That reproduced an
+    age-blind landmark arm, which is NOT the arm the manuscript reports.
+
+    Resolved lazily, not at import, because several modules import this file for
+    its model and dataset classes and must not be forced to set the variable.
+    """
+    m = os.environ.get('BEHRT_AGE_MODE')
+    if m not in ('removed', 'normal'):
+        raise SystemExit(
+            'BEHRT_AGE_MODE must be set explicitly.\n'
+            '  removed = every age token blanked to PAD. The main MarketScan\n'
+            '            model, where records are cut at the fracture.\n'
+            '  normal  = real ages. The landmark and matched arms, where the\n'
+            '            fixed observation window already removes the signal.\n'
+            f'  got: {m!r}')
+    return m
+
+
 class FinetuneDataset(Dataset):
     """Sequence → (tokens, ages, positions, segments, mask, sex, label).
 
@@ -123,13 +159,20 @@ class FinetuneDataset(Dataset):
             np.array([token2idx.get(c, unk) for c in row], dtype=np.int32)
             for row in dataframe['code']
         ]
-        # Temporal-leakage correction (always on): every age token is set to the
-        # PAD index so the age embedding contributes a constant, zero-information
-        # vector. Ages are never read into the model. See the module header.
-        self.age_ids = [
-            np.full(len(row), self.age_pad_id, dtype=np.int32)
-            for row in dataframe['age']
-        ]
+        # Age channel, per BEHRT_AGE_MODE (required; see resolve_age_mode).
+        # 'removed' blanks every age token to the PAD index so the age embedding
+        # contributes a constant, zero-information vector.  'normal' keeps the
+        # real ages, which is what the landmark and matched arms use.
+        if resolve_age_mode() == 'removed':
+            self.age_ids = [
+                np.full(len(row), self.age_pad_id, dtype=np.int32)
+                for row in dataframe['age']
+            ]
+        else:
+            self.age_ids = [
+                np.array([age2idx.get(str(a), 0) for a in row], dtype=np.int32)
+                for row in dataframe['age']
+            ]
 
         if sex_dict is not None and 'enrolid' in dataframe.columns:
             self.sex_values = np.array(

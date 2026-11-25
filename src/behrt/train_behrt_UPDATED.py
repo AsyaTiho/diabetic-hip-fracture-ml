@@ -1,7 +1,12 @@
 #!/usr/bin/env python
 """BEHRT MLM pre-training with Optuna hyperparameter optimization.
 
-Phase 1 — Bayesian hyperparameter search (Optuna) on a data subset. -> will skip this step and use the best hyperparameters found in the original script.
+Phase 1 — Bayesian hyperparameter search (Optuna) on a data subset.
+    The search runs HERE, on the same architecture that Phase 2 trains
+    (including the sex channel).  It previously lived in a separate script
+    whose model had no sex channel, so hyperparameters were selected for one
+    architecture and used to train another.  Set BEHRT_SKIP_SEARCH=1 to reuse
+    an existing optuna_best_params.pkl.
 Phase 2 — Full training with the best hyperparameters.
 Phase 3 — Extract patient embeddings from the trained model.
 
@@ -67,6 +72,13 @@ ACCUMULATION_STEPS = 4
 EVALS_PER_EPOCH = 4
 
 # -- Full training --
+# -- Optuna hyperparameter search --
+N_TRIALS         = int(os.environ.get('BEHRT_N_TRIALS', '30'))
+OPTUNA_EPOCHS    = 5
+OPTUNA_TRAIN_CAP = 100_000
+OPTUNA_VAL_CAP   = 10_000
+SKIP_SEARCH      = os.environ.get('BEHRT_SKIP_SEARCH', '0') == '1'
+
 FINAL_EPOCHS = 100
 
 # If True, refuse to resume from an existing checkpoint and force a fresh
@@ -414,12 +426,124 @@ def main():
     gc.collect()
 
     # ══════════════════════════════════════════════════════════
+    #  PHASE 1: Bayesian hyperparameter search (Optuna)
+    # ══════════════════════════════════════════════════════════
+    params_path = os.path.join(OUTPUT_DIR, 'optuna_best_params.pkl')
+
+    if SKIP_SEARCH and os.path.exists(params_path):
+        print(f'\nBEHRT_SKIP_SEARCH=1, reusing {params_path}')
+    else:
+        if os.path.exists(params_path):
+            raise SystemExit(
+                f'{params_path} already exists. A fresh search would overwrite '
+                f'it. Point BEHRT_OUTPUT_DIR at a new folder, or set '
+                f'BEHRT_SKIP_SEARCH=1 to reuse these parameters.')
+
+        print('\n' + '=' * 60)
+        print('  PHASE 1: Bayesian Hyperparameter Search (Optuna)')
+        print('=' * 60 + '\n')
+        print(f'  trials {N_TRIALS}, {OPTUNA_EPOCHS} epochs each, on '
+              f'{OPTUNA_TRAIN_CAP:,} train / {OPTUNA_VAL_CAP:,} val patients')
+
+        _rng = np.random.RandomState(SEED)
+        tr_n = min(len(train_dataset), OPTUNA_TRAIN_CAP)
+        va_n = min(len(val_dataset),   OPTUNA_VAL_CAP)
+        opt_train_sub = Subset(train_dataset,
+                               _rng.choice(len(train_dataset), tr_n, replace=False))
+        opt_val_sub   = Subset(val_dataset,
+                               _rng.choice(len(val_dataset), va_n, replace=False))
+
+        def _trial_epoch(mdl, loader, opt, sch, scaler, desc):
+            """Minimal loop for a trial. The production train_one_epoch carries
+            mid-epoch validation and checkpointing, which must not fire here."""
+            mdl.train()
+            use_amp = (device.type == 'cuda')
+            for batch in tqdm(loader, desc=desc, leave=False):
+                age, code, pos, seg, mask, label, sex = [t.to(device) for t in batch]
+                opt.zero_grad(set_to_none=True)
+                with torch.autocast('cuda', enabled=use_amp):
+                    loss = mdl(input_ids=code, age_ids=age, seg_ids=seg,
+                               posi_ids=pos, sex_ids=sex, attention_mask=mask,
+                               masked_lm_labels=label)
+                    if isinstance(loss, tuple):
+                        loss = loss[0]
+                scaler.scale(loss).backward()
+                scaler.step(opt)
+                scaler.update()
+                sch.step()
+
+        def objective(trial):
+            hs   = trial.suggest_categorical('hidden_size',        [128, 192, 256, 288, 384])
+            nl   = trial.suggest_int('num_hidden_layers', 2, 8)
+            nh   = trial.suggest_categorical('num_attention_heads', [4, 6, 8, 12])
+            intr = trial.suggest_categorical('intermediate_size',   [256, 512, 768, 1024])
+            lr   = trial.suggest_float('lr', 1e-5, 5e-4, log=True)
+            drop = trial.suggest_float('dropout', 0.05, 0.3)
+
+            if hs % nh != 0:
+                raise optuna.TrialPruned()
+
+            cfg = BehrtConfig(
+                vocab_size=len(token2idx),
+                hidden_size=hs,
+                num_hidden_layers=nl,
+                num_attention_heads=nh,
+                intermediate_size=intr,
+                hidden_dropout_prob=drop,
+                attention_probs_dropout_prob=drop,
+                max_position_embeddings=MAX_LEN,
+                seg_vocab_size=2,
+                age_vocab_size=len(age2idx),
+                sex_vocab_size=3,
+            )
+            mdl = BehrtForMaskedLM(cfg).to(device)
+
+            t_loader = DataLoader(opt_train_sub, batch_size=BATCH_SIZE, shuffle=True)
+            v_loader = DataLoader(opt_val_sub,   batch_size=BATCH_SIZE)
+
+            steps = len(t_loader) * OPTUNA_EPOCHS
+            opt_, sch = create_optimizer_and_scheduler(
+                mdl, {'lr': lr, 'warmup_proportion': 0.1, 'weight_decay': 0.01}, steps)
+            scaler = torch.amp.GradScaler('cuda', enabled=(device.type == 'cuda'))
+
+            vloss = float('inf')
+            for ep in range(OPTUNA_EPOCHS):
+                _trial_epoch(mdl, t_loader, opt_, sch, scaler,
+                             f'T{trial.number} E{ep + 1}')
+                vloss = evaluate(mdl, v_loader, device, desc=f'T{trial.number} val')
+                trial.report(vloss, ep)
+                if trial.should_prune():
+                    del mdl; torch.cuda.empty_cache(); gc.collect()
+                    raise optuna.TrialPruned()
+
+            del mdl; torch.cuda.empty_cache(); gc.collect()
+            return vloss
+
+        study = optuna.create_study(
+            direction='minimize',
+            pruner=optuna.pruners.MedianPruner(n_startup_trials=5, n_warmup_steps=2),
+            study_name='behrt_hpo')
+        study.optimize(objective, n_trials=N_TRIALS, show_progress_bar=True)
+
+        best = study.best_params
+        print(f'\nBest trial #{study.best_trial.number}  '
+              f'val_loss = {study.best_value:.4f}')
+        for k, v in best.items():
+            print(f'  {k}: {v}')
+
+        with open(params_path, 'wb') as f:
+            pickle.dump(best, f)
+        study.trials_dataframe().to_csv(
+            os.path.join(OUTPUT_DIR, 'optuna_trials.csv'), index=False)
+        print(f'  saved {params_path} and optuna_trials.csv')
+
+    # ══════════════════════════════════════════════════════════
     #  Load Best Hyperparameters
     # ══════════════════════════════════════════════════════════
     print('\n' + '=' * 60)
     print('  Load Best Hyperparameters')
     print('=' * 60 + '\n')
-    with open(os.path.join(OUTPUT_DIR, 'optuna_best_params.pkl'), 'rb') as f:
+    with open(params_path, 'rb') as f:
         best = pickle.load(f)
     print(f'Best hyperparameters: {best}')
 
@@ -607,10 +731,20 @@ def main():
     embeddings = np.concatenate(emb_list, axis=0)
     print(f'Embeddings shape: {embeddings.shape}')
 
-    np.save(os.path.join(OUTPUT_DIR, 'patient_embeddings.npy'), embeddings)
-
-    emb_df = pd.DataFrame(embeddings, index=sequences['enrolid'].values)
-    emb_df.to_pickle(os.path.join(OUTPUT_DIR, 'patient_embeddings.pkl'))
+    # One .npz carrying both the ids and the matrix.  This previously wrote the
+    # same numbers twice: a bare .npy with nothing recording which row is which
+    # patient, and a pandas .pkl carrying the enrolid index, for twice the disk.
+    # A pandas pickle also couples the artifact to a library version; an .npz
+    # does not, holds the ids alongside the matrix, and supports mmap_mode='r'
+    # so a consumer can read a subset without loading the whole thing.
+    emb_path = os.path.join(OUTPUT_DIR, 'patient_embeddings.npz')
+    enrolids = sequences['enrolid'].values.astype('int64')
+    assert len(enrolids) == len(embeddings), (
+        f'{len(enrolids):,} enrolids against {len(embeddings):,} embedding rows')
+    np.savez(emb_path, enrolid=enrolids,
+             embedding=embeddings.astype('float32'))
+    print(f'  saved {emb_path} '
+          f'({embeddings.shape[0]:,} x {embeddings.shape[1]})', flush=True)
 
     print(f'\nDone!')
     print(f'  Best hyperparameters:  {best}')
