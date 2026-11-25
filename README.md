@@ -37,10 +37,9 @@ The code that turns the raw MarketScan databases into `patient_sequences.pkl`,
 `hip_frac_labels_CANONICAL.pkl` and the one-hot matrices is not shipped: it is
 useless without the licensed source data and carries the database paths of the
 machine it ran on. [`docs/COHORT_CONSTRUCTION.md`](docs/COHORT_CONSTRUCTION.md)
-records what it does in full, including the inclusion criteria and the SQL, the
-extraction query and why it is shaped the way it is, how sequences and the
-vocabulary are built, and a defect in the adult-onset criterion found on
-2026-11-24 together with its correction.
+records what it does in full: the inclusion criteria and the SQL, the extraction
+query and why it is shaped the way it is, how sequences and the vocabulary are
+built, and how the labels are derived.
 
 ## Pipeline order
 

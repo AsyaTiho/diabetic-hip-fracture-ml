@@ -5,7 +5,7 @@ and `one_hot_features_4groups.npz`. The code that produces those files from the
 raw MarketScan databases is not shipped, because it is useless without the
 licensed source data and because it contains the database paths of the machine it
 ran on. This document records what it does, in enough detail to reimplement or to
-audit, including a defect found on 2026-11-24 and corrected.
+audit.
 
 ## The source
 
@@ -62,9 +62,10 @@ intervals and gap-aware, exceeding 365.
 other on birth year or sex are excluded, because every age in the study is
 computed from `dobyr` and theirs is unresolvable.
 
-## The defect in criterion 1, and the correction
+## Why criterion 1 aggregates before testing age
 
-Until 2026-11-24 criterion 1 was written as a single existential query:
+The obvious way to write criterion 1 is a single query with the age test in the
+`WHERE` clause:
 
 ```sql
 SELECT DISTINCT p.enrolid
@@ -73,20 +74,15 @@ WHERE p.phecode IN ('EM_202', 'EM_202.1', 'EM_202.2')
   AND CAST(2003 + p.intday / 365.25 - d.dobyr AS INTEGER) >= 20
 ```
 
-Read it row by row. It admits a patient if **any single** diabetes code falls at
-age 20 or older, so a patient diagnosed at 12 who still has diabetes codes at 20,
-which is every type 1 patient surviving into adulthood, qualifies. `DISTINCT`
-then collapses them to one row.
+That form answers a different question. A predicate inside `WHERE` is evaluated
+per row, so it can only ask whether *some* diabetes code falls at age 20 or
+older. A patient diagnosed at 12 who still has diabetes codes at 20, which is
+every type 1 patient surviving into adulthood, satisfies it.
 
-The rule is existential where it should concern the earliest event. The cause is
-structural rather than a typo: a test inside `WHERE` is evaluated per row, so it
-can only ever ask whether *some* row qualifies. Making it a statement about onset
-requires the aggregation to happen first and the age test to happen after, which
-is the `MIN(intday) ... GROUP BY enrolid` form above.
-
-An audit applying the age test after aggregation, with no filter inside the
-query, found **8,872 patients (0.08%)** of 10,506,954 whose earliest diabetes code
-predates age 20:
+Adult onset is a statement about the *earliest* code, so the aggregation has to
+happen first and the age test afterwards, which is the `MIN(intday) ... GROUP BY
+enrolid` form above. On this cohort the distinction is worth 8,872 patients
+(0.08%), whose earliest diabetes code predates age 20:
 
 | Age at earliest diabetes code | Patients |
 | --- | --- |
@@ -96,22 +92,12 @@ predates age 20:
 | 15 to 19 | 7,185 |
 
 Median 17. Small in proportion, but these are the patients with the longest
-disease duration, and the Methods state they are not in the cohort.
+disease duration.
 
-The corrected criterion was checked against the prediction that it should remove
-exactly those patients and no others, by set identity rather than by count:
-
-```
-previous cohort            10,506,954
-pediatric-onset audit list      8,872
-previous minus pediatric   10,498,082
-corrected criterion 1      10,498,082
-in new only: 0   in expected only: 0
-```
-
-The corrected form is also eleven times faster, 95 s against 1,108 s, because the
-existential form had to join to `DEMO`, evaluate an age expression per row, and
-then deduplicate a large intermediate.
+The aggregating form is also eleven times faster, 95 s against 1,108 s, because
+the `WHERE`-clause version must join to `DEMO`, evaluate an age expression per
+row, and then deduplicate a large intermediate, none of which can use the
+covering index.
 
 ## Extraction
 
