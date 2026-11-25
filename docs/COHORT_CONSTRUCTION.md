@@ -198,10 +198,10 @@ The vocabulary is 3,310 tokens: 5 special plus 3,305 phenotypes.
 ## A note on reproducing any of this
 
 These counts come from `PHE_2024.db` as rebuilt on 13 November 2026. An earlier
-build of the same source was corrupted by a `pandas.read_sas` 32-bit row-offset
-overflow above 2^28 rows, which wrote the numeric columns of later rows to the
-wrong positions while text columns survived: diagnosis codes stayed valid but
-attached to the wrong patients on the wrong dates, for the 2021 to 2023 extracts.
-Any cohort built from that earlier database is roughly 12.7% too large, because
-one diabetes code admits a patient and no single code evicts one, so corruption
-inflates a one-hit criterion about elevenfold.
+build of the same source was corrupted by a row-offset overflow in
+`pandas.read_sas` on very large files, which wrote the numeric columns of later
+rows to the wrong positions while text columns survived: diagnosis codes stayed
+valid but attached to the wrong patients on the wrong dates, in the 2021 to 2023
+extracts. A cohort built from that earlier database is about 13% larger than this
+one. Spurious diagnosis codes can only add patients to criterion 1, never remove
+them, since one diabetes code admits a patient and no single code evicts one.
